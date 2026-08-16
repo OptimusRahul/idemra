@@ -11,6 +11,17 @@ from idemra.config.permissions import (
     load_permissions,
 )
 from idemra.config.scaffold import idemra_dir, write_scaffold
+from idemra.db.session import session_scope
+from idemra.orchestrator.runs import (
+    ApprovalConflict,
+    NoPendingApproval,
+    RunNotFound,
+    get_events,
+    get_run,
+    list_runs,
+    record_approval_decision,
+    replay_run,
+)
 from idemra.world_model.build import build_world_model
 from idemra.world_model.snapshot import NotAGitRepo
 
@@ -69,33 +80,78 @@ def run(repo: str, task: str) -> None:
 
 
 @app.command()
-def status(run_id: str | None = None) -> None:
+def status(run_id: str | None = typer.Argument(None)) -> None:
     """Show run status — all runs, or one by id."""
-    raise NotImplementedError("Phase 2: query runs table")
+    with session_scope() as session:
+        if run_id is None:
+            runs = list_runs(session)
+            if not runs:
+                console.print("[yellow]No runs yet.[/yellow]")
+                return
+            for r in runs:
+                console.print(f"  {r.id}  {r.status:<18} {r.task}")
+            return
+
+        try:
+            r = get_run(session, run_id)
+        except RunNotFound as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
+        console.print(f"[bold]{r.id}[/bold]  status={r.status}  task={r.task!r}  repo={r.repo}")
 
 
 @app.command()
 def approve(run_id: str) -> None:
     """Approve a pending change, unblocking the apply step."""
-    raise NotImplementedError("Phase 2: write approval decision event")
+    with session_scope() as session:
+        try:
+            record_approval_decision(session, run_id, "approved")
+        except (RunNotFound, NoPendingApproval, ApprovalConflict) as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
+    console.print(f"[bold green]Approved[/bold green] run {run_id}")
 
 
 @app.command()
 def reject(run_id: str, reason: str = "") -> None:
     """Reject a pending change."""
-    raise NotImplementedError("Phase 2: write approval decision event")
+    with session_scope() as session:
+        try:
+            record_approval_decision(session, run_id, "rejected", reason=reason or None)
+        except (RunNotFound, NoPendingApproval, ApprovalConflict) as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
+    console.print(f"[bold red]Rejected[/bold red] run {run_id}")
 
 
 @app.command()
 def log(run_id: str) -> None:
     """Dump the full event history for a run."""
-    raise NotImplementedError("Phase 2: event log dump")
+    with session_scope() as session:
+        try:
+            events = get_events(session, run_id)
+        except RunNotFound as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
+
+        if not events:
+            console.print("[yellow]No events for this run yet.[/yellow]")
+            return
+        for e in events:
+            console.print(f"  seq={e.seq}  {e.type}  {e.payload}")
 
 
 @app.command(name="replay")
 def replay_cmd(run_id: str) -> None:
     """Reconstruct run state deterministically from its event stream."""
-    raise NotImplementedError("Phase 2: replay engine")
+    with session_scope() as session:
+        try:
+            result = replay_run(session, run_id)
+        except RunNotFound as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
+    console.print(f"[bold]{result.run_id}[/bold]  reconstructed status={result.status}")
+    console.print(f"  applied {len(result.applied_event_types)} event(s): {result.applied_event_types}")
 
 
 if __name__ == "__main__":
