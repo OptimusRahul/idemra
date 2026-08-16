@@ -32,8 +32,9 @@ Full phase plan, current milestone, and open issues: see
 
 ## Architecture
 
-See [`docs/adr/`](docs/adr/) for every real decision and why it was made,
-in order:
+See [`docs/architecture.md`](docs/architecture.md) for a single-picture
+system diagram (Mermaid, renders inline on GitHub), and [`docs/adr/`](docs/adr/)
+for every real decision and why it was made, in order:
 
 1. [Record architecture decisions](docs/adr/0001-record-architecture-decisions.md)
 2. [Postgres as single source of truth, event-sourced](docs/adr/0002-postgres-event-sourcing.md)
