@@ -20,6 +20,8 @@ dependencies = [
     "opentelemetry-api>=1.29",
     "opentelemetry-sdk>=1.29",
     "pyyaml>=6.0",
+    "tree-sitter>=0.26.0",
+    "tree-sitter-python>=0.25.0",
 ]
 
 [project.scripts]
