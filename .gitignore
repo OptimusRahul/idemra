@@ -12,3 +12,6 @@ uv.lock.bak
 # Runtime folder Idemra creates when pointed at a target repo —
 # never generated inside this repo itself, but ignored defensively.
 .idemra/
+
+# Serena MCP tool project metadata/cache
+.serena/
