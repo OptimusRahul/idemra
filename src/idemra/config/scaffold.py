@@ -35,11 +35,22 @@ enabled: false
 provider: null
 """
 
+IDEMRA_GITIGNORE = """\
+# Generated at runtime — may be large, and brain/receipts/ risk holding
+# pre-redaction content. Only the .yml config files above are committable.
+brain/
+memory/
+queue/
+logs/
+receipts/
+"""
+
 SCAFFOLD_FILES = {
     "permissions.yml": PERMISSIONS_YML,
     "outcomes.yml": OUTCOMES_YML,
     "mcp.yml": MCP_YML,
     "web_search.yml": WEB_SEARCH_YML,
+    ".gitignore": IDEMRA_GITIGNORE,
 }
 
 

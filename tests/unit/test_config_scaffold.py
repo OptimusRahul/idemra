@@ -19,3 +19,12 @@ def test_write_scaffold_is_idempotent(tmp_path: Path) -> None:
 
     assert second == []
     assert (idemra_dir(tmp_path) / "permissions.yml").read_text() == "custom: true\n"
+
+
+def test_write_scaffold_gitignores_generated_world_model_dirs(tmp_path: Path) -> None:
+    write_scaffold(tmp_path)
+
+    gitignore = (idemra_dir(tmp_path) / ".gitignore").read_text()
+
+    for generated_dir in ("brain/", "memory/", "queue/", "logs/", "receipts/"):
+        assert generated_dir in gitignore
