@@ -11,6 +11,8 @@ from idemra.config.permissions import (
     load_permissions,
 )
 from idemra.config.scaffold import idemra_dir, write_scaffold
+from idemra.world_model.build import build_world_model
+from idemra.world_model.snapshot import NotAGitRepo
 
 app = typer.Typer(name="idemra", help="Production reliability infrastructure for coding agents.")
 console = Console()
@@ -43,6 +45,21 @@ def config(repo: str = typer.Argument(".", help="Target repo to read Idemra conf
     console.print("[bold]Layer 2 permissions[/bold] (permissions.yml)")
     console.print(f"  approval_required: {list(permissions.approval_required)}")
     console.print(f"  denied_paths: {list(permissions.denied_paths)}")
+
+
+@app.command(name="index")
+def index_cmd(repo: str = typer.Argument(".", help="Target repo to build the world model for.")) -> None:
+    """Build the world model (structural snapshot + symbol index) for a target repo."""
+    repo_root = Path(repo).resolve()
+    try:
+        result = build_world_model(repo_root)
+    except NotAGitRepo as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(f"[bold green]World model built[/bold green] for {repo_root}")
+    console.print(f"  {len(result.snapshot.files)} files -> {result.snapshot_path.relative_to(repo_root)}")
+    console.print(f"  {len(result.symbols)} symbols -> {result.symbols_path.relative_to(repo_root)}")
 
 
 @app.command()
