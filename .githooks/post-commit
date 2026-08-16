@@ -5,16 +5,16 @@
 # the terminal, so a flaky network never gets in the way of committing.
 set -uo pipefail
 
-VAULT_DIR="/Users/ghost/vault/ghost/Projects/Idemra"
+VAULT_DIR="${IDEMRA_HOOK_VAULT_DIR:-/Users/ghost/vault/ghost/Projects/Idemra}"
 ACTIVITY_LOG="$VAULT_DIR/Idemra Activity Log.md"
-RELAY_DIR="/Users/ghost/Developer/discord-relay"
-HOOK_LOG="/tmp/idemra-post-commit-hook.log"
+RELAY_DIR="${IDEMRA_HOOK_RELAY_DIR:-/Users/ghost/Developer/discord-relay}"
+HOOK_LOG="${IDEMRA_HOOK_LOG:-/tmp/idemra-post-commit-hook.log}"
 
 HASH="$(git rev-parse --short HEAD)"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 SUBJECT="$(git log -1 --pretty=%s)"
 BODY="$(git log -1 --pretty=%b)"
-FILES_CHANGED="$(git diff-tree --no-commit-id --name-only -r HEAD | wc -l | tr -d ' ')"
+FILES_CHANGED="$(git diff-tree --no-commit-id --name-only -r --root HEAD | wc -l | tr -d ' ')"
 ISSUES="$(printf '%s\n%s' "$SUBJECT" "$BODY" | grep -oE '#[0-9]+' | sort -u -V | tr '\n' ' ' | sed 's/ *$//')"
 TIMESTAMP="$(date '+%Y-%m-%d %H:%M')"
 
@@ -38,12 +38,19 @@ fi
   echo
 } >> "$ACTIVITY_LOG"
 
-# --- Discord: post checkpoint, async so it can't block or fail the commit ---
-(
+# --- Discord: post checkpoint. Async in normal use so it can't block or fail
+# the commit; IDEMRA_HOOK_SYNC=1 (tests only) runs it inline so the caller can
+# assert on the result deterministically instead of racing a background job.
+post_discord() {
   MESSAGE="\`$HASH\` on \`$BRANCH\`: $SUBJECT ($FILES_CHANGED files)"
   [ -n "$ISSUES" ] && MESSAGE="$MESSAGE — refs $ISSUES"
   cd "$RELAY_DIR" && node scripts/post-cli.js update --product agent-os --checkpoint --message "$MESSAGE" >> "$HOOK_LOG" 2>&1
-) &
-disown
+}
+if [ "${IDEMRA_HOOK_SYNC:-0}" = "1" ]; then
+  post_discord
+else
+  ( post_discord ) &
+  disown
+fi
 
 exit 0
