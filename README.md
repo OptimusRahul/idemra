@@ -58,12 +58,21 @@ Narrative/decision-history (market research, naming process, the full
 the plan looks like this, not something a contributor needs to operate the
 code.
 
+There's also a fourth, unfiltered layer: every commit on `main` auto-posts
+a one-line summary to an Obsidian activity log and a Discord checkpoint via
+`.githooks/post-commit`. This is machine-local automation (hardcoded paths
+to this developer's vault and `discord-relay` install), not something a
+fresh clone gets for free — see "Local development" below to enable it.
+
 ## Local development
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d
 uv sync --all-groups
 uv run pytest
+
+# optional: enable the auto-post-to-Obsidian/Discord git hook
+git config core.hooksPath .githooks
 ```
 
 ## License
