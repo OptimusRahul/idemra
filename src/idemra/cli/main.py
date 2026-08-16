@@ -1,7 +1,12 @@
 """Idemra CLI — Typer app, Rich output."""
 
+from pathlib import Path
+
 import typer
 from rich.console import Console
+
+from idemra.config.permissions import PermissionsNotFound, load_permissions
+from idemra.config.scaffold import idemra_dir, write_scaffold
 
 app = typer.Typer(name="idemra", help="Production reliability infrastructure for coding agents.")
 console = Console()
@@ -10,14 +15,30 @@ console = Console()
 @app.command()
 def init(repo: str = typer.Argument(".", help="Target repo to initialize Idemra into.")) -> None:
     """Create the .idemra/ folder structure and default config in a target repo."""
-    console.print(f"[bold]idemra init[/bold] — scaffolding .idemra/ in {repo}")
-    raise NotImplementedError("Phase 1: create .idemra/ tree + permissions.yml/outcomes.yml")
+    repo_root = Path(repo).resolve()
+    written = write_scaffold(repo_root)
+    if not written:
+        console.print(f"[yellow]{idemra_dir(repo_root)} already exists[/yellow] — leaving it untouched.")
+        raise typer.Exit(code=0)
+
+    console.print(f"[bold green]Initialized[/bold green] {idemra_dir(repo_root)}")
+    for path in written:
+        console.print(f"  created {path.relative_to(repo_root)}")
 
 
 @app.command()
-def config() -> None:
+def config(repo: str = typer.Argument(".", help="Target repo to read Idemra config from.")) -> None:
     """Show current permission configuration."""
-    raise NotImplementedError("Phase 1: read + render permissions.yml")
+    repo_root = Path(repo).resolve()
+    try:
+        permissions = load_permissions(repo_root)
+    except PermissionsNotFound as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    console.print("[bold]Layer 2 permissions[/bold] (permissions.yml)")
+    console.print(f"  approval_required: {permissions.get('approval_required', [])}")
+    console.print(f"  denied_paths: {permissions.get('denied_paths', [])}")
 
 
 @app.command()
