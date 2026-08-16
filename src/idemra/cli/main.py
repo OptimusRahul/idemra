@@ -50,19 +50,19 @@ def run(repo: str, task: str) -> None:
 @app.command()
 def status(run_id: str | None = None) -> None:
     """Show run status — all runs, or one by id."""
-    raise NotImplementedError("Phase 1: query runs table")
+    raise NotImplementedError("Phase 2: query runs table")
 
 
 @app.command()
 def approve(run_id: str) -> None:
     """Approve a pending change, unblocking the apply step."""
-    raise NotImplementedError("Phase 1: write approval decision event")
+    raise NotImplementedError("Phase 2: write approval decision event")
 
 
 @app.command()
 def reject(run_id: str, reason: str = "") -> None:
     """Reject a pending change."""
-    raise NotImplementedError("Phase 1: write approval decision event")
+    raise NotImplementedError("Phase 2: write approval decision event")
 
 
 @app.command()

@@ -18,9 +18,10 @@ feature of the plan, not a gap.
 
 ## Status
 
-**Phase 1 — Skeleton & Permissions**, in progress (target: 2026-08-30).
-Schema, CLI skeleton, Layer 1 permissions, Docker Compose, and CI are
-committed; nothing is wired end-to-end yet. Not usable.
+**Phase 1 — Skeleton & Permissions**, complete. **Phase 2 — World Model**,
+in progress (target: 2026-09-12): repo structural snapshot, symbol index,
+Layer 2 permissions parsing, and the remaining run-introspection CLI
+commands (`status`/`approve`/`reject`/`log`/`replay`). Not usable yet.
 
 Full phase plan, current milestone, and open issues: see
 [Tracking](#tracking) below.
