@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: idemra
       POSTGRES_PASSWORD: idemra
     ports:
-      - "5432:5432"
+      - "5433:5432"  # 5432 is taken by a local (non-Docker) Postgres on this machine
     volumes:
       - idemra_postgres:/var/lib/postgresql/data
 

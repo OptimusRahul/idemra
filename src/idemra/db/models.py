@@ -45,8 +45,8 @@ class Event(Base):
     type: Mapped[str] = mapped_column(String)
     schema_version: Mapped[int] = mapped_column(default=1)
     payload: Mapped[dict] = mapped_column(JSON)
-    # run_id:step_id — enforced unique so a retried/duplicated publish is a no-op, not a double-execution.
-    idempotency_key: Mapped[str] = mapped_column(String, unique=True)
+    # run_id:step_id — enforced unique (see UniqueConstraint below) so a retried/duplicated publish is a no-op, not a double-execution.
+    idempotency_key: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(default=_now)
 
     __table_args__ = (
