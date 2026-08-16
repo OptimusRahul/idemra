@@ -18,10 +18,14 @@ feature of the plan, not a gap.
 
 ## Status
 
-**Phase 1 — Skeleton & Permissions**, complete. **Phase 2 — World Model**,
-in progress (target: 2026-09-12): repo structural snapshot, symbol index,
-Layer 2 permissions parsing, and the remaining run-introspection CLI
-commands (`status`/`approve`/`reject`/`log`/`replay`). Not usable yet.
+**Phase 1 — Skeleton & Permissions** and **Phase 2 — World Model** are both
+complete, ahead of Phase 2's 2026-09-12 target. `idemra index` builds a
+repo structural snapshot + tree-sitter symbol index into `.idemra/brain/`;
+Layer 2 `permissions.yml` parses into a typed, validated structure; and
+`status`/`approve`/`reject`/`log`/`replay` are wired against the real
+event-sourced schema, with idempotent approval decisions verified against
+live Postgres. **Phase 3 — First Agent & LLM** is next. Not usable yet —
+still no agent to actually dispatch a task.
 
 Full phase plan, current milestone, and open issues: see
 [Tracking](#tracking) below.
