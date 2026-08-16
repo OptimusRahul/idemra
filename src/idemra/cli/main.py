@@ -5,7 +5,11 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from idemra.config.permissions import PermissionsNotFound, load_permissions
+from idemra.config.permissions import (
+    InvalidPermissionsConfig,
+    PermissionsNotFound,
+    load_permissions,
+)
 from idemra.config.scaffold import idemra_dir, write_scaffold
 
 app = typer.Typer(name="idemra", help="Production reliability infrastructure for coding agents.")
@@ -32,13 +36,13 @@ def config(repo: str = typer.Argument(".", help="Target repo to read Idemra conf
     repo_root = Path(repo).resolve()
     try:
         permissions = load_permissions(repo_root)
-    except PermissionsNotFound as exc:
+    except (PermissionsNotFound, InvalidPermissionsConfig) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1)
 
     console.print("[bold]Layer 2 permissions[/bold] (permissions.yml)")
-    console.print(f"  approval_required: {permissions.get('approval_required', [])}")
-    console.print(f"  denied_paths: {permissions.get('denied_paths', [])}")
+    console.print(f"  approval_required: {list(permissions.approval_required)}")
+    console.print(f"  denied_paths: {list(permissions.denied_paths)}")
 
 
 @app.command()
