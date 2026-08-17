@@ -18,15 +18,18 @@ feature of the plan, not a gap.
 
 ## Status
 
-**Phases 1-3 are complete**, ahead of Phase 3's 2026-09-26 target.
-`idemra run <repo> <task>` now does something real: the Coder Agent reads
-the world model, proposes whole-file rewrites via a hybrid Ollama/Claude
-LLM router, and gates every write behind Layer 1 + Layer 2 permission
-checks and a human approval step — `idemra approve` applies the change,
-`idemra replay` reconstructs the outcome from the event log alone, never
-by re-invoking the LLM. **Phase 4 — Master Agent & Routing** is next, not
-yet scoped. Usable for a single, human-supervised change per invocation —
-no routing between multiple agents, no background execution yet.
+**Phases 1-4 are complete**, ahead of Phase 4's 2026-10-10 target.
+`idemra run <repo> <task>` now routes through a Master Agent before
+anything else happens: a deterministic (no LLM call) router rejects an
+empty task or a nonexistent repo path before any world-model build or
+LLM cost, and every run — including failures — is auditable via `idemra
+status`/`idemra log` from the moment it's created. Past routing, the
+Coder Agent reads the world model, proposes whole-file rewrites via a
+hybrid Ollama/Claude LLM router, and gates every write behind Layer 1 +
+Layer 2 permission checks and a human approval step. **Phase 5 —
+Background Execution** is next, not yet scoped. Usable for a single,
+human-supervised change per invocation — no routing between multiple
+agents (only one capability exists so far), no background execution yet.
 
 Full phase plan, current milestone, and open issues: see
 [Tracking](#tracking) below.
