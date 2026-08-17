@@ -19,6 +19,7 @@ from idemra.orchestrator.runs import (
     InvalidDecision,
     NoPendingApproval,
     RunNotFound,
+    expire_stale_approvals,
     get_events,
     get_run,
     list_runs,
@@ -181,3 +182,65 @@ def test_record_event_increments_seq_across_calls(session: Session) -> None:
 
     assert first.seq == 1
     assert second.seq == 2
+
+
+# --- expire_stale_approvals ---
+
+
+def _make_approval(session: Session, run: Run, status: str, expires_at: datetime) -> Approval:
+    approval = Approval(run_id=run.id, step_id="apply", status=status, expires_at=expires_at)
+    session.add(approval)
+    session.flush()
+    return approval
+
+
+def test_expire_stale_approvals_expires_past_ttl_pending_approval(session: Session) -> None:
+    run = _make_run(session)
+    approval = _make_approval(session, run, "pending", datetime.now(UTC) - timedelta(hours=1))
+
+    affected = expire_stale_approvals(session)
+
+    assert approval.status == "expired"
+    assert run.status == "stale"
+    assert affected == [run]
+    events = get_events(session, run.id)
+    assert events[-1].type == "status_changed"
+    assert events[-1].payload["status"] == "stale"
+
+
+def test_expire_stale_approvals_leaves_not_yet_expired_approval_untouched(session: Session) -> None:
+    run = _make_run(session)
+    approval = _make_approval(session, run, "pending", datetime.now(UTC) + timedelta(hours=1))
+
+    affected = expire_stale_approvals(session)
+
+    assert approval.status == "pending"
+    assert run.status == "pending"
+    assert affected == []
+
+
+def test_expire_stale_approvals_leaves_already_decided_approval_untouched(session: Session) -> None:
+    # A real approved-and-applied run must never get silently reclassified
+    # as stale by a sweep that runs later, no matter how far past its TTL.
+    run = _make_run(session)
+    approval = _make_approval(session, run, "approved", datetime.now(UTC) - timedelta(hours=1))
+    run.status = "completed"
+
+    affected = expire_stale_approvals(session)
+
+    assert approval.status == "approved"
+    assert run.status == "completed"
+    assert affected == []
+
+
+def test_expire_stale_approvals_handles_multiple_runs(session: Session) -> None:
+    run1 = _make_run(session, task="first")
+    run2 = _make_run(session, task="second")
+    _make_approval(session, run1, "pending", datetime.now(UTC) - timedelta(hours=1))
+    _make_approval(session, run2, "pending", datetime.now(UTC) - timedelta(hours=2))
+
+    affected = expire_stale_approvals(session)
+
+    assert {r.id for r in affected} == {run1.id, run2.id}
+    assert run1.status == "stale"
+    assert run2.status == "stale"

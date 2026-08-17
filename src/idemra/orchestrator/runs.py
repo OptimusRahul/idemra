@@ -211,6 +211,10 @@ def fail_run(session: Session, run: Run, reason: str) -> None:
     _write_status_event(session, run, "failed", "fail", extra_payload={"reason": reason})
 
 
+def mark_queued_for_apply(session: Session, run: Run) -> None:
+    _write_status_event(session, run, "queued", "queued-for-apply")
+
+
 def validate_proposal(
     proposed: list[ProposedFile], repo_root: Path, permissions: PermissionsConfig
 ) -> list[str]:
@@ -249,3 +253,32 @@ def apply_run(session: Session, run: Run, repo_root: Path, permissions: Permissi
 
     record_event(session, run, "files_applied", {"paths": [f.path for f in proposed]}, "files-applied")
     _write_status_event(session, run, "completed", "complete")
+
+
+def expire_stale_approvals(session: Session) -> list[Run]:
+    """Transition pending approvals past their TTL to "expired", and the
+    associated run to "stale" — a distinct terminal state from "failed":
+    nobody acted in time, not something that actively went wrong. Only
+    "pending" approvals are considered — an already-decided approval is
+    never reclassified, no matter how far past its TTL it now is.
+    """
+    now = datetime.now(UTC)
+    expired = session.scalars(
+        select(Approval).where(Approval.status == "pending", Approval.expires_at < now)
+    ).all()
+
+    affected_runs = []
+    for approval in expired:
+        approval.status = "expired"
+        approval.decided_at = now
+        run = get_run(session, approval.run_id)
+        _write_status_event(
+            session,
+            run,
+            "stale",
+            f"approval:{approval.id}:expired",
+            extra_payload={"reason": "approval TTL expired"},
+        )
+        affected_runs.append(run)
+
+    return affected_runs
