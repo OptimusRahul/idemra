@@ -5,6 +5,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rq import Worker
 
 from idemra.agents.coder import MalformedProposal, propose_changes
 from idemra.config.permissions import (
@@ -20,12 +21,13 @@ from idemra.orchestrator.runs import (
     ApprovalConflict,
     NoPendingApproval,
     RunNotFound,
-    apply_run,
     create_run,
+    expire_stale_approvals,
     fail_run,
     get_events,
     get_run,
     list_runs,
+    mark_queued_for_apply,
     record_approval_decision,
     record_proposal,
     replay_run,
@@ -34,6 +36,7 @@ from idemra.orchestrator.runs import (
     validate_proposal,
 )
 from idemra.permissions.layer2 import requires_approval
+from idemra.queue.jobs import enqueue_apply, get_queue
 from idemra.world_model.build import build_world_model
 from idemra.world_model.snapshot import NotAGitRepo
 
@@ -154,11 +157,13 @@ def run(repo: str, task: str) -> None:
             )
             console.print(f"  see: idemra approve {run_row.id}  /  idemra reject {run_row.id}")
         else:
-            apply_run(session, run_row, repo_root, permissions)
+            mark_queued_for_apply(session, run_row)
+            enqueue_apply(run_row.id)
             console.print(
-                f"[bold green]Run {run_row.id} completed[/bold green] — "
-                f"{len(proposed)} file(s) written (approval not required)"
+                f"[bold]Run {run_row.id}[/bold] queued for apply "
+                f"({len(proposed)} file(s) proposed, approval not required)"
             )
+            console.print(f"  see: idemra status {run_row.id}  (needs a running idemra worker)")
 
 
 @app.command()
@@ -184,8 +189,10 @@ def status(run_id: str | None = typer.Argument(None)) -> None:
 
 @app.command()
 def approve(run_id: str) -> None:
-    """Approve a pending change, then apply it — unless it's already been
-    applied (idempotent retry), in which case this is a no-op."""
+    """Approve a pending change, then queue it for apply — unless it's
+    already been queued/applied (idempotent retry), in which case this is
+    a no-op. Applying happens in the background: run `idemra worker` to
+    actually pick up and apply queued changes."""
     with session_scope() as session:
         try:
             record_approval_decision(session, run_id, "approved")
@@ -197,25 +204,14 @@ def approve(run_id: str) -> None:
         if run_row.status != "approved":
             console.print(
                 f"[bold green]Approved[/bold green] run {run_id} "
-                f"(already {run_row.status} — nothing more to apply)"
+                f"(already {run_row.status} — nothing more to queue)"
             )
             return
 
-        console.print(f"[bold green]Approved[/bold green] run {run_id}")
-
-        try:
-            permissions = load_permissions(Path(run_row.repo))
-        except (PermissionsNotFound, InvalidPermissionsConfig) as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(code=1)
-
-        apply_run(session, run_row, Path(run_row.repo), permissions)
-
-        if run_row.status == "completed":
-            console.print(f"[bold green]Run {run_id} completed[/bold green]")
-        else:
-            console.print(f"[red]Run {run_id} failed to apply[/red] — see: idemra log {run_id}")
-            raise typer.Exit(code=1)
+        mark_queued_for_apply(session, run_row)
+        enqueue_apply(run_row.id)
+        console.print(f"[bold green]Approved[/bold green] run {run_id} — queued for apply")
+        console.print(f"  see: idemra status {run_id}  (needs a running idemra worker)")
 
 
 @app.command()
@@ -258,6 +254,41 @@ def replay_cmd(run_id: str) -> None:
             raise typer.Exit(code=1)
     console.print(f"[bold]{result.run_id}[/bold]  reconstructed status={result.status}")
     console.print(f"  applied {len(result.applied_event_types)} event(s): {result.applied_event_types}")
+
+
+@app.command()
+def worker(
+    burst: bool = typer.Option(
+        False, "--burst", help="Process currently queued jobs, then exit, instead of running forever."
+    ),
+) -> None:
+    """Run a background worker that applies queued changes.
+
+    Long-running by default — blocks until interrupted (Ctrl-C). Use
+    --burst to process what's currently queued and exit (useful for
+    scripts/smoke tests, not for normal use).
+    """
+    queue = get_queue()
+    w = Worker([queue], connection=queue.connection)
+    mode = " (burst mode)" if burst else ""
+    console.print(f"[bold]Worker listening[/bold] on '{queue.name}' queue{mode}")
+    w.work(burst=burst)
+
+
+@app.command()
+def sweep() -> None:
+    """Expire pending approvals past their TTL, marking the associated
+    runs stale. Not a background job — a fast DB query, run manually or
+    via cron, not queued."""
+    with session_scope() as session:
+        affected = expire_stale_approvals(session)
+
+        if not affected:
+            console.print("[yellow]No stale approvals to expire.[/yellow]")
+            return
+        console.print(f"[bold]Expired {len(affected)} approval(s)[/bold], run(s) marked stale:")
+        for r in affected:
+            console.print(f"  {r.id}  {r.task}")
 
 
 if __name__ == "__main__":

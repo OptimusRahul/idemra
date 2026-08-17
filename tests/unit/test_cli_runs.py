@@ -15,6 +15,7 @@ from idemra.agents.coder import ProposedFile
 from idemra.cli.main import app
 from idemra.db.models import Approval, Base, Run
 from idemra.orchestrator.runs import record_proposal
+from idemra.queue.jobs import apply_run_job
 
 runner = CliRunner()
 
@@ -90,7 +91,8 @@ def test_status_unknown_run_fails(db) -> None:
     assert result.exit_code == 1
 
 
-def test_approve_then_log_then_replay(db, tmp_path: Path) -> None:
+def test_approve_then_log_then_replay(db, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("idemra.cli.main.enqueue_apply", lambda run_id: None)
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     run_id = _seed_run_with_proposal_and_pending_approval(db, repo_root)
@@ -98,6 +100,9 @@ def test_approve_then_log_then_replay(db, tmp_path: Path) -> None:
     approve_result = runner.invoke(app, ["approve", run_id])
     assert approve_result.exit_code == 0
     assert "Approved" in approve_result.stdout
+
+    apply_run_job(run_id)  # simulates `idemra worker` picking the job up
+
     assert (repo_root / "fixed.py").read_text() == "fixed = True\n"
 
     log_result = runner.invoke(app, ["log", run_id])
@@ -129,3 +134,32 @@ def test_log_unknown_run_fails(db) -> None:
     result = runner.invoke(app, ["log", "does-not-exist"])
 
     assert result.exit_code == 1
+
+
+def test_sweep_with_nothing_to_expire(db) -> None:
+    result = runner.invoke(app, ["sweep"])
+
+    assert result.exit_code == 0
+    assert "No stale approvals" in result.stdout
+
+
+def test_sweep_expires_past_ttl_approval_and_reports_it(db) -> None:
+    session = db()
+    run = Run(task="stuck run", repo="example/repo")
+    session.add(run)
+    session.flush()
+    session.add(
+        Approval(run_id=run.id, step_id="apply", expires_at=datetime.now(UTC) - timedelta(hours=1))
+    )
+    session.commit()
+    run_id = run.id
+    session.close()
+
+    result = runner.invoke(app, ["sweep"])
+
+    assert result.exit_code == 0
+    assert "Expired 1 approval" in result.stdout
+    assert run_id in result.stdout
+
+    status_result = runner.invoke(app, ["status", run_id])
+    assert "stale" in status_result.stdout

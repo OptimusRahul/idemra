@@ -1,7 +1,15 @@
 """idemra run / idemra approve wiring — end-to-end via CliRunner.
 
 No real LLM call anywhere: llm_complete is monkeypatched at the CLI
-module boundary (idemra.cli.main.llm_complete) with a fake.
+module boundary (idemra.cli.main.llm_complete) with a fake. Applying is
+now queued, not synchronous — enqueue_apply is monkeypatched per-test
+(never autouse) so both states are directly provable: a spy proves
+idemra approve/run returns without applying (the real async behavior),
+and a separate monkeypatch to apply_run_job simulates an instantly
+available worker to prove the job itself does the right thing. Real RQ
+enqueue/dequeue mechanics are verified only in the manual live-infra
+smoke test — same treatment this suite gives Postgres (SQLite stands in
+here; nothing here touches real Redis).
 """
 
 import json
@@ -15,6 +23,7 @@ from typer.testing import CliRunner
 
 from idemra.cli.main import app
 from idemra.db.models import Base
+from idemra.queue.jobs import apply_run_job
 
 runner = CliRunner()
 
@@ -75,18 +84,45 @@ def test_run_creates_proposal_and_does_not_block(db, repo: Path, monkeypatch: py
     assert not (repo / "new.py").exists()  # non-blocking — nothing written yet
 
 
-def test_approve_after_run_writes_the_file(db, repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_approve_queues_without_applying_synchronously(db, repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "idemra.cli.main.llm_complete", _fake_complete_writing("new.py", "x = 1\n")
     )
+    calls = []
+    monkeypatch.setattr("idemra.cli.main.enqueue_apply", lambda run_id: calls.append(run_id))
     run_result = runner.invoke(app, ["run", str(repo), "add a file"])
     run_id = _extract_run_id(run_result.stdout)
 
     approve_result = runner.invoke(app, ["approve", run_id])
 
     assert approve_result.exit_code == 0
-    assert "completed" in approve_result.stdout
+    assert "queued" in approve_result.stdout
+    assert calls == [run_id]
+    assert not (repo / "new.py").exists()  # nothing applied without a worker
+
+    status_result = runner.invoke(app, ["status", run_id])
+    assert "queued" in status_result.stdout
+
+
+def test_approve_then_worker_applies_the_change(db, repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "idemra.cli.main.llm_complete", _fake_complete_writing("new.py", "x = 1\n")
+    )
+    # enqueue_apply is a no-op during the CLI calls — a worker is a
+    # separate process that only ever sees a job after the enqueuing
+    # transaction has committed, so apply_run_job is invoked as an
+    # explicit separate step below, not inline during approve().
+    monkeypatch.setattr("idemra.cli.main.enqueue_apply", lambda run_id: None)
+    run_result = runner.invoke(app, ["run", str(repo), "add a file"])
+    run_id = _extract_run_id(run_result.stdout)
+    approve_result = runner.invoke(app, ["approve", run_id])
+    assert approve_result.exit_code == 0
+
+    apply_run_job(run_id)  # simulates `idemra worker` picking the job up
+
     assert (repo / "new.py").read_text() == "x = 1\n"
+    status_result = runner.invoke(app, ["status", run_id])
+    assert "completed" in status_result.stdout
 
 
 def test_reject_after_run_writes_nothing(db, repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,18 +164,39 @@ def test_run_fails_closed_on_layer2_denied_path(db, repo: Path, monkeypatch: pyt
     assert not (repo / "secrets" / "creds.json").exists()
 
 
-def test_run_auto_applies_when_write_not_in_approval_required(
+def test_run_auto_queues_when_write_not_in_approval_required(
     db, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (repo / ".idemra" / "permissions.yml").write_text("approval_required: []\ndenied_paths: []\n")
     monkeypatch.setattr(
         "idemra.cli.main.llm_complete", _fake_complete_writing("new.py", "x = 1\n")
     )
+    calls = []
+    monkeypatch.setattr("idemra.cli.main.enqueue_apply", lambda run_id: calls.append(run_id))
 
     result = runner.invoke(app, ["run", str(repo), "add a file"])
 
     assert result.exit_code == 0
-    assert "completed" in result.stdout
+    assert "queued" in result.stdout
+    assert len(calls) == 1
+    assert not (repo / "new.py").exists()  # nothing applied without a worker
+
+
+def test_run_auto_apply_then_worker_applies_the_change(
+    db, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / ".idemra" / "permissions.yml").write_text("approval_required: []\ndenied_paths: []\n")
+    monkeypatch.setattr(
+        "idemra.cli.main.llm_complete", _fake_complete_writing("new.py", "x = 1\n")
+    )
+    monkeypatch.setattr("idemra.cli.main.enqueue_apply", lambda run_id: None)
+
+    result = runner.invoke(app, ["run", str(repo), "add a file"])
+    assert result.exit_code == 0
+    run_id = _extract_run_id(result.stdout)
+
+    apply_run_job(run_id)  # simulates `idemra worker` picking the job up
+
     assert (repo / "new.py").read_text() == "x = 1\n"
 
 
@@ -156,9 +213,11 @@ def test_retried_approve_is_idempotent(db, repo: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(
         "idemra.cli.main.llm_complete", _fake_complete_writing("new.py", "x = 1\n")
     )
+    monkeypatch.setattr("idemra.cli.main.enqueue_apply", lambda run_id: None)
     run_result = runner.invoke(app, ["run", str(repo), "add a file"])
     run_id = _extract_run_id(run_result.stdout)
     runner.invoke(app, ["approve", run_id])
+    apply_run_job(run_id)  # simulates `idemra worker` completing the job
 
     second = runner.invoke(app, ["approve", run_id])
 
