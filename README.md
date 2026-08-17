@@ -18,14 +18,15 @@ feature of the plan, not a gap.
 
 ## Status
 
-**Phase 1 — Skeleton & Permissions** and **Phase 2 — World Model** are both
-complete, ahead of Phase 2's 2026-09-12 target. `idemra index` builds a
-repo structural snapshot + tree-sitter symbol index into `.idemra/brain/`;
-Layer 2 `permissions.yml` parses into a typed, validated structure; and
-`status`/`approve`/`reject`/`log`/`replay` are wired against the real
-event-sourced schema, with idempotent approval decisions verified against
-live Postgres. **Phase 3 — First Agent & LLM** is next. Not usable yet —
-still no agent to actually dispatch a task.
+**Phases 1-3 are complete**, ahead of Phase 3's 2026-09-26 target.
+`idemra run <repo> <task>` now does something real: the Coder Agent reads
+the world model, proposes whole-file rewrites via a hybrid Ollama/Claude
+LLM router, and gates every write behind Layer 1 + Layer 2 permission
+checks and a human approval step — `idemra approve` applies the change,
+`idemra replay` reconstructs the outcome from the event log alone, never
+by re-invoking the LLM. **Phase 4 — Master Agent & Routing** is next, not
+yet scoped. Usable for a single, human-supervised change per invocation —
+no routing between multiple agents, no background execution yet.
 
 Full phase plan, current milestone, and open issues: see
 [Tracking](#tracking) below.
