@@ -15,6 +15,7 @@ from idemra.config.permissions import (
 from idemra.config.scaffold import idemra_dir, write_scaffold
 from idemra.db.session import session_scope
 from idemra.llm.router import complete as llm_complete
+from idemra.orchestrator.master import record_routing_decision, route_task
 from idemra.orchestrator.runs import (
     ApprovalConflict,
     NoPendingApproval,
@@ -88,27 +89,45 @@ def index_cmd(repo: str = typer.Argument(".", help="Target repo to build the wor
 
 @app.command()
 def run(repo: str, task: str) -> None:
-    """Start a run: propose a change via the Coder Agent, then gate it on approval.
+    """Start a run: route the task, propose a change via the Coder Agent,
+    then gate it on approval.
 
     Does not block — creates the proposal and (if required) the approval
     request, then exits. Use `idemra approve`/`idemra reject` to continue.
+
+    Every failure mode below now happens inside a Run row that already
+    exists — including routing rejection, missing permissions.yml, and a
+    non-git repo — so `idemra status`/`idemra log` can show it. Phase 3
+    checked permissions/world-model *before* creating the run, which left
+    those two failure classes with no audit trail at all.
     """
     repo_root = Path(repo).resolve()
-    try:
-        permissions = load_permissions(repo_root)
-    except (PermissionsNotFound, InvalidPermissionsConfig) as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1)
-
-    try:
-        world_model = build_world_model(repo_root)
-    except NotAGitRepo as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1)
 
     with session_scope() as session:
         run_row = create_run(session, repo=str(repo_root), task=task)
+
+        decision = route_task(task, repo_root)
+        record_routing_decision(session, run_row, decision)
+        if not decision.accepted:
+            fail_run(session, run_row, f"rejected by router: {decision.reason}")
+            console.print(f"[red]Run {run_row.id} rejected[/red] by router: {decision.reason}")
+            raise typer.Exit(code=1)
+
         start_run(session, run_row)
+
+        try:
+            permissions = load_permissions(repo_root)
+        except (PermissionsNotFound, InvalidPermissionsConfig) as exc:
+            fail_run(session, run_row, str(exc))
+            console.print(f"[red]Run {run_row.id} failed[/red]: {exc}")
+            raise typer.Exit(code=1)
+
+        try:
+            world_model = build_world_model(repo_root)
+        except NotAGitRepo as exc:
+            fail_run(session, run_row, str(exc))
+            console.print(f"[red]Run {run_row.id} failed[/red]: {exc}")
+            raise typer.Exit(code=1)
 
         try:
             proposed = propose_changes(task, world_model, complete=llm_complete)

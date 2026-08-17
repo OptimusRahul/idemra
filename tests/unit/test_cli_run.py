@@ -164,3 +164,59 @@ def test_retried_approve_is_idempotent(db, repo: Path, monkeypatch: pytest.Monke
 
     assert second.exit_code == 0
     assert "already completed" in second.stdout
+
+
+def test_run_rejects_empty_task_before_building_world_model(db, repo: Path) -> None:
+    result = runner.invoke(app, ["run", str(repo), ""])
+
+    assert result.exit_code == 1
+    assert "rejected" in result.stdout
+    assert not (repo / ".idemra" / "brain").exists()  # world model was never built
+
+    run_id = _extract_run_id(result.stdout)
+    status_result = runner.invoke(app, ["status", run_id])
+    assert status_result.exit_code == 0
+    assert "failed" in status_result.stdout  # the run row exists — auditable, not silently dropped
+
+
+def test_run_rejects_nonexistent_repo(db, tmp_path: Path) -> None:
+    missing_repo = tmp_path / "does-not-exist"
+
+    result = runner.invoke(app, ["run", str(missing_repo), "add a file"])
+
+    assert result.exit_code == 1
+    assert "rejected" in result.stdout
+
+    run_id = _extract_run_id(result.stdout)
+    status_result = runner.invoke(app, ["status", run_id])
+    assert status_result.exit_code == 0
+    assert "failed" in status_result.stdout
+
+
+def test_run_fails_when_permissions_missing_but_still_auditable(db, repo: Path) -> None:
+    (repo / ".idemra" / "permissions.yml").unlink()
+
+    result = runner.invoke(app, ["run", str(repo), "add a file"])
+
+    assert result.exit_code == 1
+    run_id = _extract_run_id(result.stdout)
+    status_result = runner.invoke(app, ["status", run_id])
+    assert status_result.exit_code == 0
+    assert "failed" in status_result.stdout  # Phase 3 never created a row for this failure
+
+
+def test_run_records_routing_decision_before_change_proposed(
+    db, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "idemra.cli.main.llm_complete", _fake_complete_writing("new.py", "x = 1\n")
+    )
+    run_result = runner.invoke(app, ["run", str(repo), "add a file"])
+    run_id = _extract_run_id(run_result.stdout)
+
+    log_result = runner.invoke(app, ["log", run_id])
+
+    lines_with_events = [line for line in log_result.stdout.splitlines() if "seq=" in line]
+    assert "routing_decision" in lines_with_events[0]
+    event_types_in_order = [line.split()[1] for line in lines_with_events]
+    assert event_types_in_order.index("routing_decision") < event_types_in_order.index("change_proposed")
