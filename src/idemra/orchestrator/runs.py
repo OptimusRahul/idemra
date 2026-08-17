@@ -1,22 +1,37 @@
-"""Run introspection plus the approval/replay mechanics event-sourcing
-depends on.
+"""Run lifecycle: creation, world-model-driven proposal, the approval gate,
+and applying a change to disk — plus the introspection/replay mechanics
+event-sourcing depends on.
 
-No domain event types exist yet — no agent produces real run events
-until Phase 3 — so the only event type this module writes and folds
-over is "status_changed". That's enough to prove idempotent event
-publishing and deterministic replay actually work, without inventing a
-domain-specific reducer for events nothing emits yet.
+Two event types beyond "status_changed" exist as of Phase 3:
+"change_proposed" (the Coder Agent's full proposal, stored verbatim so
+apply_run and replay never re-invoke the LLM — ADR2) and "files_applied"
+(which paths were actually written). replay_run needs no changes for
+either — it already folds generically over any event type, only treating
+"status_changed" specially for status reconstruction.
+
+run.status is a materialized cache of the same fold replay_run performs
+independently from the event log; every transition function here updates
+both in the same flush so the two never diverge.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from idemra.agents.coder import ProposedFile
+from idemra.config.permissions import PermissionsConfig
 from idemra.db.models import Approval, Event, Run
+from idemra.permissions.layer1 import (
+    PermissionViolation,
+    assert_not_denied_path,
+    assert_within_repo_root,
+)
+from idemra.permissions.layer2 import assert_not_layer2_denied
 
 VALID_DECISIONS = frozenset({"approved", "rejected"})
 
@@ -34,6 +49,10 @@ class ApprovalConflict(Exception):
 
 
 class InvalidDecision(Exception):
+    pass
+
+
+class NoProposalFound(Exception):
     pass
 
 
@@ -73,7 +92,7 @@ def record_approval_decision(
     if decision not in VALID_DECISIONS:
         raise InvalidDecision(f"decision must be one of {sorted(VALID_DECISIONS)}, got {decision!r}")
 
-    get_run(session, run_id)
+    run = get_run(session, run_id)
     approval = session.scalars(
         select(Approval).where(Approval.run_id == run_id).order_by(Approval.requested_at.desc())
     ).first()
@@ -91,6 +110,7 @@ def record_approval_decision(
     approval.status = decision
     approval.decided_at = datetime.now(UTC)
     approval.reason = reason
+    run.status = decision  # keep the materialized run.status in sync with the log
 
     event = Event(
         run_id=run_id,
@@ -122,3 +142,117 @@ def replay_run(session: Session, run_id: str) -> ReplayResult:
             status = event.payload["status"]
 
     return ReplayResult(run_id=run_id, status=status, applied_event_types=applied)
+
+
+def create_run(session: Session, repo: str, task: str) -> Run:
+    run = Run(repo=repo, task=task)
+    session.add(run)
+    session.flush()
+    return run
+
+
+def _write_status_event(
+    session: Session, run: Run, status: str, idempotency_suffix: str, extra_payload: dict | None = None
+) -> None:
+    run.status = status
+    payload = {"status": status, **(extra_payload or {})}
+    event = Event(
+        run_id=run.id,
+        seq=_next_seq(session, run.id),
+        type="status_changed",
+        payload=payload,
+        idempotency_key=f"{run.id}:{idempotency_suffix}",
+    )
+    session.add(event)
+    session.flush()
+
+
+def start_run(session: Session, run: Run) -> None:
+    _write_status_event(session, run, "running", "start")
+
+
+def record_proposal(session: Session, run: Run, proposed: list[ProposedFile]) -> None:
+    """Store the Coder Agent's full proposal verbatim.
+
+    apply_run and replay_run both read this back instead of ever calling
+    the LLM again — ADR2's "replay reconstructs from what happened, never
+    re-invokes the LLM" promise, made real rather than just asserted.
+    """
+    event = Event(
+        run_id=run.id,
+        seq=_next_seq(session, run.id),
+        type="change_proposed",
+        payload={"files": [{"path": f.path, "content": f.content} for f in proposed]},
+        idempotency_key=f"{run.id}:proposal",
+    )
+    session.add(event)
+    session.flush()
+
+
+def _get_proposal(session: Session, run_id: str) -> list[ProposedFile]:
+    event = session.scalars(
+        select(Event)
+        .where(Event.run_id == run_id, Event.type == "change_proposed")
+        .order_by(Event.seq.desc())
+    ).first()
+    if event is None:
+        raise NoProposalFound(f"no change_proposed event for run {run_id}")
+    return [ProposedFile(path=f["path"], content=f["content"]) for f in event.payload["files"]]
+
+
+def request_approval(session: Session, run: Run, step_id: str, ttl: timedelta) -> Approval:
+    approval = Approval(run_id=run.id, step_id=step_id, expires_at=datetime.now(UTC) + ttl)
+    session.add(approval)
+    _write_status_event(session, run, "awaiting_approval", "await-approval")
+    return approval
+
+
+def fail_run(session: Session, run: Run, reason: str) -> None:
+    _write_status_event(session, run, "failed", "fail", extra_payload={"reason": reason})
+
+
+def validate_proposal(
+    proposed: list[ProposedFile], repo_root: Path, permissions: PermissionsConfig
+) -> list[str]:
+    """Check every proposed path against Layer 1 + Layer 2. Returns a list
+    of violation messages (empty = all clear) rather than raising on the
+    first failure, so a caller can report every problem at once."""
+    violations = []
+    for proposed_file in proposed:
+        target = repo_root / proposed_file.path
+        try:
+            assert_within_repo_root(target, repo_root)
+            assert_not_denied_path(target)
+            assert_not_layer2_denied(target, permissions)
+        except PermissionViolation as exc:
+            violations.append(str(exc))
+    return violations
+
+
+def apply_run(session: Session, run: Run, repo_root: Path, permissions: PermissionsConfig) -> None:
+    """Re-reads the stored proposal (never re-invokes the LLM) and writes
+    it to disk. All-or-nothing: every path is validated before anything is
+    written, so a run never leaves the repo half-changed."""
+    proposed = _get_proposal(session, run.id)
+
+    violations = validate_proposal(proposed, repo_root, permissions)
+    if violations:
+        fail_run(session, run, "; ".join(violations))
+        return
+
+    _write_status_event(session, run, "applying", "apply-start")
+
+    for proposed_file in proposed:
+        target = repo_root / proposed_file.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(proposed_file.content)
+
+    event = Event(
+        run_id=run.id,
+        seq=_next_seq(session, run.id),
+        type="files_applied",
+        payload={"paths": [f.path for f in proposed]},
+        idempotency_key=f"{run.id}:files-applied",
+    )
+    session.add(event)
+    _write_status_event(session, run, "completed", "complete")
