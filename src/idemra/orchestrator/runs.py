@@ -86,6 +86,24 @@ def _next_seq(session: Session, run_id: str) -> int:
     return (max_seq or 0) + 1
 
 
+def record_event(
+    session: Session, run: Run, event_type: str, payload: dict, idempotency_suffix: str
+) -> Event:
+    """The single Event(...) construction site — every write below goes
+    through this, so sequencing and the idempotency-key convention
+    (f"{run.id}:{suffix}") only need to be gotten right once."""
+    event = Event(
+        run_id=run.id,
+        seq=_next_seq(session, run.id),
+        type=event_type,
+        payload=payload,
+        idempotency_key=f"{run.id}:{idempotency_suffix}",
+    )
+    session.add(event)
+    session.flush()
+    return event
+
+
 def record_approval_decision(
     session: Session, run_id: str, decision: str, reason: str | None = None
 ) -> Approval:
@@ -112,17 +130,9 @@ def record_approval_decision(
     approval.reason = reason
     run.status = decision  # keep the materialized run.status in sync with the log
 
-    event = Event(
-        run_id=run_id,
-        seq=_next_seq(session, run_id),
-        type="status_changed",
-        payload={"status": decision},
-        # run_id:approval:<approval id>:decision — a retried/duplicated
-        # approve/reject call is a no-op, not a double-decision.
-        idempotency_key=f"{run_id}:approval:{approval.id}:decision",
-    )
-    session.add(event)
-    session.flush()
+    # approval:<approval id>:decision — a retried/duplicated approve/reject
+    # call is a no-op, not a double-decision.
+    record_event(session, run, "status_changed", {"status": decision}, f"approval:{approval.id}:decision")
     return approval
 
 
@@ -156,15 +166,7 @@ def _write_status_event(
 ) -> None:
     run.status = status
     payload = {"status": status, **(extra_payload or {})}
-    event = Event(
-        run_id=run.id,
-        seq=_next_seq(session, run.id),
-        type="status_changed",
-        payload=payload,
-        idempotency_key=f"{run.id}:{idempotency_suffix}",
-    )
-    session.add(event)
-    session.flush()
+    record_event(session, run, "status_changed", payload, idempotency_suffix)
 
 
 def start_run(session: Session, run: Run) -> None:
@@ -178,15 +180,13 @@ def record_proposal(session: Session, run: Run, proposed: list[ProposedFile]) ->
     the LLM again — ADR2's "replay reconstructs from what happened, never
     re-invokes the LLM" promise, made real rather than just asserted.
     """
-    event = Event(
-        run_id=run.id,
-        seq=_next_seq(session, run.id),
-        type="change_proposed",
-        payload={"files": [{"path": f.path, "content": f.content} for f in proposed]},
-        idempotency_key=f"{run.id}:proposal",
+    record_event(
+        session,
+        run,
+        "change_proposed",
+        {"files": [{"path": f.path, "content": f.content} for f in proposed]},
+        "proposal",
     )
-    session.add(event)
-    session.flush()
 
 
 def _get_proposal(session: Session, run_id: str) -> list[ProposedFile]:
@@ -247,12 +247,5 @@ def apply_run(session: Session, run: Run, repo_root: Path, permissions: Permissi
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(proposed_file.content)
 
-    event = Event(
-        run_id=run.id,
-        seq=_next_seq(session, run.id),
-        type="files_applied",
-        payload={"paths": [f.path for f in proposed]},
-        idempotency_key=f"{run.id}:files-applied",
-    )
-    session.add(event)
+    record_event(session, run, "files_applied", {"paths": [f.path for f in proposed]}, "files-applied")
     _write_status_event(session, run, "completed", "complete")

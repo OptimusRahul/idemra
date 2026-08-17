@@ -23,6 +23,7 @@ from idemra.orchestrator.runs import (
     get_run,
     list_runs,
     record_approval_decision,
+    record_event,
     replay_run,
 )
 
@@ -156,3 +157,27 @@ def test_replay_run_defaults_to_pending_with_no_events(session: Session) -> None
 
     assert result.status == "pending"
     assert result.applied_event_types == []
+
+
+# --- record_event ---
+
+
+def test_record_event_writes_correct_type_payload_and_idempotency_key(session: Session) -> None:
+    run = _make_run(session)
+
+    event = record_event(session, run, "custom_event", {"foo": "bar"}, "my-suffix")
+
+    assert event.type == "custom_event"
+    assert event.payload == {"foo": "bar"}
+    assert event.idempotency_key == f"{run.id}:my-suffix"
+    assert event.seq == 1
+
+
+def test_record_event_increments_seq_across_calls(session: Session) -> None:
+    run = _make_run(session)
+
+    first = record_event(session, run, "a", {}, "first")
+    second = record_event(session, run, "b", {}, "second")
+
+    assert first.seq == 1
+    assert second.seq == 2
