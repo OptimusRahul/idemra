@@ -18,18 +18,24 @@ feature of the plan, not a gap.
 
 ## Status
 
-**Phases 1-4 are complete**, ahead of Phase 4's 2026-10-10 target.
-`idemra run <repo> <task>` now routes through a Master Agent before
-anything else happens: a deterministic (no LLM call) router rejects an
-empty task or a nonexistent repo path before any world-model build or
-LLM cost, and every run — including failures — is auditable via `idemra
-status`/`idemra log` from the moment it's created. Past routing, the
-Coder Agent reads the world model, proposes whole-file rewrites via a
-hybrid Ollama/Claude LLM router, and gates every write behind Layer 1 +
-Layer 2 permission checks and a human approval step. **Phase 5 —
-Background Execution** is next, not yet scoped. Usable for a single,
-human-supervised change per invocation — no routing between multiple
-agents (only one capability exists so far), no background execution yet.
+**Phases 1-5 are complete**, ahead of Phase 5's 2026-10-24 target.
+`idemra approve` no longer applies a change inline — it queues the job
+onto Redis via RQ and returns immediately; a separate, long-running
+`idemra worker` process applies it. Every `apply_run` invocation goes
+through the same queue, whether triggered by an explicit approval or by
+`approval_required` not covering `"write"`. `idemra sweep` expires
+pending approvals past their TTL, finally using `stale`/`expired`
+schema states that have sat documented-but-unused since Phase 1. Before
+any of that: `idemra run` routes through a deterministic Master Agent
+that rejects an empty task or a nonexistent repo path before any
+world-model build or LLM cost, and every run — including failures — is
+auditable via `idemra status`/`idemra log` from the moment it's created.
+The Coder Agent reads the world model, proposes whole-file rewrites via
+a hybrid Ollama/Claude LLM router, and gates every write behind Layer 1
++ Layer 2 permission checks. **Phase 6 — GitHub & Self-Healing** is
+next, not yet scoped. Usable for a single, human-supervised change per
+invocation, applied in the background once a worker is running — no
+routing between multiple agents yet (only one capability exists so far).
 
 Full phase plan, current milestone, and open issues: see
 [Tracking](#tracking) below.
