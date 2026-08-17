@@ -11,8 +11,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from typer.testing import CliRunner
 
+from idemra.agents.coder import ProposedFile
 from idemra.cli.main import app
 from idemra.db.models import Approval, Base, Run
+from idemra.orchestrator.runs import record_proposal
 
 runner = CliRunner()
 
@@ -26,11 +28,30 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return sessionmaker(bind=engine)
 
 
-def _seed_run_with_pending_approval(db) -> str:
+def _seed_run_with_pending_approval(db, repo: str = "example/repo") -> str:
     session = db()
-    run = Run(task="fix the bug", repo="example/repo")
+    run = Run(task="fix the bug", repo=repo)
     session.add(run)
     session.flush()
+    session.add(Approval(run_id=run.id, step_id="apply", expires_at=datetime.now(UTC) + timedelta(hours=1)))
+    session.commit()
+    run_id = run.id
+    session.close()
+    return run_id
+
+
+def _seed_run_with_proposal_and_pending_approval(db, repo_root: Path) -> str:
+    """Like _seed_run_with_pending_approval, but with a real repo path +
+    permissions.yml + a stored proposal — the shape `idemra approve` now
+    needs since it applies the change, not just records the decision."""
+    (repo_root / ".idemra").mkdir()
+    (repo_root / ".idemra" / "permissions.yml").write_text("approval_required:\n  - write\ndenied_paths: []\n")
+
+    session = db()
+    run = Run(task="fix the bug", repo=str(repo_root))
+    session.add(run)
+    session.flush()
+    record_proposal(session, run, [ProposedFile(path="fixed.py", content="fixed = True\n")])
     session.add(Approval(run_id=run.id, step_id="apply", expires_at=datetime.now(UTC) + timedelta(hours=1)))
     session.commit()
     run_id = run.id
@@ -69,20 +90,24 @@ def test_status_unknown_run_fails(db) -> None:
     assert result.exit_code == 1
 
 
-def test_approve_then_log_then_replay(db) -> None:
-    run_id = _seed_run_with_pending_approval(db)
+def test_approve_then_log_then_replay(db, tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    run_id = _seed_run_with_proposal_and_pending_approval(db, repo_root)
 
     approve_result = runner.invoke(app, ["approve", run_id])
     assert approve_result.exit_code == 0
     assert "Approved" in approve_result.stdout
+    assert (repo_root / "fixed.py").read_text() == "fixed = True\n"
 
     log_result = runner.invoke(app, ["log", run_id])
     assert log_result.exit_code == 0
     assert "status_changed" in log_result.stdout
+    assert "files_applied" in log_result.stdout
 
     replay_result = runner.invoke(app, ["replay", run_id])
     assert replay_result.exit_code == 0
-    assert "approved" in replay_result.stdout
+    assert "completed" in replay_result.stdout
 
 
 def test_reject_with_reason(db) -> None:

@@ -1,10 +1,12 @@
 """Idemra CLI — Typer app, Rich output."""
 
+from datetime import timedelta
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
+from idemra.agents.coder import MalformedProposal, propose_changes
 from idemra.config.permissions import (
     InvalidPermissionsConfig,
     PermissionsNotFound,
@@ -12,18 +14,29 @@ from idemra.config.permissions import (
 )
 from idemra.config.scaffold import idemra_dir, write_scaffold
 from idemra.db.session import session_scope
+from idemra.llm.router import complete as llm_complete
 from idemra.orchestrator.runs import (
     ApprovalConflict,
     NoPendingApproval,
     RunNotFound,
+    apply_run,
+    create_run,
+    fail_run,
     get_events,
     get_run,
     list_runs,
     record_approval_decision,
+    record_proposal,
     replay_run,
+    request_approval,
+    start_run,
+    validate_proposal,
 )
+from idemra.permissions.layer2 import requires_approval
 from idemra.world_model.build import build_world_model
 from idemra.world_model.snapshot import NotAGitRepo
+
+APPROVAL_TTL = timedelta(hours=24)
 
 app = typer.Typer(name="idemra", help="Production reliability infrastructure for coding agents.")
 console = Console()
@@ -75,8 +88,58 @@ def index_cmd(repo: str = typer.Argument(".", help="Target repo to build the wor
 
 @app.command()
 def run(repo: str, task: str) -> None:
-    """Start a run: dispatch task against repo, blocking on the approval gate."""
-    raise NotImplementedError("Phase 3: wires the Coder Agent to the orchestrator")
+    """Start a run: propose a change via the Coder Agent, then gate it on approval.
+
+    Does not block — creates the proposal and (if required) the approval
+    request, then exits. Use `idemra approve`/`idemra reject` to continue.
+    """
+    repo_root = Path(repo).resolve()
+    try:
+        permissions = load_permissions(repo_root)
+    except (PermissionsNotFound, InvalidPermissionsConfig) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        world_model = build_world_model(repo_root)
+    except NotAGitRepo as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    with session_scope() as session:
+        run_row = create_run(session, repo=str(repo_root), task=task)
+        start_run(session, run_row)
+
+        try:
+            proposed = propose_changes(task, world_model, complete=llm_complete)
+        except MalformedProposal as exc:
+            fail_run(session, run_row, f"malformed proposal: {exc}")
+            console.print(f"[red]Run {run_row.id} failed[/red] — Coder Agent returned a malformed proposal")
+            raise typer.Exit(code=1)
+
+        record_proposal(session, run_row, proposed)
+
+        violations = validate_proposal(proposed, repo_root, permissions)
+        if violations:
+            fail_run(session, run_row, "; ".join(violations))
+            console.print(f"[red]Run {run_row.id} failed[/red] permission checks:")
+            for v in violations:
+                console.print(f"  {v}")
+            raise typer.Exit(code=1)
+
+        if requires_approval("write", permissions):
+            request_approval(session, run_row, step_id="apply", ttl=APPROVAL_TTL)
+            console.print(
+                f"[bold]Run {run_row.id}[/bold] created, awaiting approval "
+                f"({len(proposed)} file(s) proposed)"
+            )
+            console.print(f"  see: idemra approve {run_row.id}  /  idemra reject {run_row.id}")
+        else:
+            apply_run(session, run_row, repo_root, permissions)
+            console.print(
+                f"[bold green]Run {run_row.id} completed[/bold green] — "
+                f"{len(proposed)} file(s) written (approval not required)"
+            )
 
 
 @app.command()
@@ -102,14 +165,38 @@ def status(run_id: str | None = typer.Argument(None)) -> None:
 
 @app.command()
 def approve(run_id: str) -> None:
-    """Approve a pending change, unblocking the apply step."""
+    """Approve a pending change, then apply it — unless it's already been
+    applied (idempotent retry), in which case this is a no-op."""
     with session_scope() as session:
         try:
             record_approval_decision(session, run_id, "approved")
         except (RunNotFound, NoPendingApproval, ApprovalConflict) as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=1)
-    console.print(f"[bold green]Approved[/bold green] run {run_id}")
+
+        run_row = get_run(session, run_id)
+        if run_row.status != "approved":
+            console.print(
+                f"[bold green]Approved[/bold green] run {run_id} "
+                f"(already {run_row.status} — nothing more to apply)"
+            )
+            return
+
+        console.print(f"[bold green]Approved[/bold green] run {run_id}")
+
+        try:
+            permissions = load_permissions(Path(run_row.repo))
+        except (PermissionsNotFound, InvalidPermissionsConfig) as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
+
+        apply_run(session, run_row, Path(run_row.repo), permissions)
+
+        if run_row.status == "completed":
+            console.print(f"[bold green]Run {run_id} completed[/bold green]")
+        else:
+            console.print(f"[red]Run {run_id} failed to apply[/red] — see: idemra log {run_id}")
+            raise typer.Exit(code=1)
 
 
 @app.command()
