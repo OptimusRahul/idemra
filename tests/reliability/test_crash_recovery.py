@@ -18,6 +18,7 @@ from rq import Worker
 from sqlalchemy.orm import Session
 
 from idemra.agents.coder import ProposedFile
+from idemra.config.permissions import load_permissions
 from idemra.config.scaffold import write_scaffold
 from idemra.orchestrator.runs import (
     apply_run,
@@ -82,8 +83,6 @@ def test_worker_crash_before_commit_leaves_run_queued_and_retry_is_safe(
     run.status reverts to "queued" — so the next attempt is a clean,
     idempotent retry rather than a resume of a half-applied change."""
     run = _seeded_run(db, repo)
-
-    from idemra.config.permissions import load_permissions
 
     permissions = load_permissions(repo)
     apply_run(db, run, repo, permissions)  # simulates the crash: never committed below

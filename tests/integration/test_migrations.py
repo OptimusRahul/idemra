@@ -26,27 +26,35 @@ from alembic.migration import MigrationContext
 from sqlalchemy import inspect
 
 from idemra.db.models import Base
+from idemra.db.session import DEFAULT_DATABASE_URL
+from tests._live_infra import postgres_reachable
 
-ADMIN_DATABASE_URL = "postgresql+psycopg://idemra:idemra@localhost:5433/idemra"
+ADMIN_DATABASE_URL = DEFAULT_DATABASE_URL
 TEST_DB_NAME = "idemra_migration_test"
 TEST_DATABASE_URL = f"postgresql+psycopg://idemra:idemra@localhost:5433/{TEST_DB_NAME}"
 ALEMBIC_INI = Path(__file__).parents[2] / "alembic.ini"
 
 
-def _postgres_reachable() -> bool:
+def _drop_test_db() -> None:
+    engine = sqlalchemy.create_engine(ADMIN_DATABASE_URL, isolation_level="AUTOCOMMIT")
     try:
-        engine = sqlalchemy.create_engine(ADMIN_DATABASE_URL)
-        with engine.connect():
-            return True
-    except Exception:  # noqa: BLE001 — any connection failure means "skip", not "crash the run"
-        return False
+        with engine.connect() as conn:
+            conn.execute(sqlalchemy.text(f'DROP DATABASE IF EXISTS "{TEST_DB_NAME}"'))
+    finally:
+        engine.dispose()
+
+
+def _table_names(url: str) -> set[str]:
+    engine = sqlalchemy.create_engine(url)
+    try:
+        return set(inspect(engine).get_table_names())
     finally:
         engine.dispose()
 
 
 @pytest.fixture
 def migration_db(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    if not _postgres_reachable():
+    if not postgres_reachable(ADMIN_DATABASE_URL):
         pytest.skip("real Postgres not reachable at localhost:5433 — run `docker compose up -d`")
 
     # migrations/env.py reads IDEMRA_DATABASE_URL itself and overrides
@@ -55,19 +63,18 @@ def migration_db(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     # shell happens to have exported (the dev DB, most likely).
     monkeypatch.setenv("IDEMRA_DATABASE_URL", TEST_DATABASE_URL)
 
-    admin_engine = sqlalchemy.create_engine(ADMIN_DATABASE_URL, isolation_level="AUTOCOMMIT")
-    with admin_engine.connect() as conn:
-        conn.execute(sqlalchemy.text(f'DROP DATABASE IF EXISTS "{TEST_DB_NAME}"'))
-        conn.execute(sqlalchemy.text(f'CREATE DATABASE "{TEST_DB_NAME}"'))
-    admin_engine.dispose()
+    _drop_test_db()
+    engine = sqlalchemy.create_engine(ADMIN_DATABASE_URL, isolation_level="AUTOCOMMIT")
+    try:
+        with engine.connect() as conn:
+            conn.execute(sqlalchemy.text(f'CREATE DATABASE "{TEST_DB_NAME}"'))
+    finally:
+        engine.dispose()
 
     try:
         yield TEST_DATABASE_URL
     finally:
-        admin_engine = sqlalchemy.create_engine(ADMIN_DATABASE_URL, isolation_level="AUTOCOMMIT")
-        with admin_engine.connect() as conn:
-            conn.execute(sqlalchemy.text(f'DROP DATABASE IF EXISTS "{TEST_DB_NAME}"'))
-        admin_engine.dispose()
+        _drop_test_db()
 
 
 def _alembic_config(db_url: str) -> Config:
@@ -80,12 +87,7 @@ def _alembic_config(db_url: str) -> Config:
 def test_alembic_upgrade_head_creates_all_expected_tables(migration_db: str) -> None:
     command.upgrade(_alembic_config(migration_db), "head")
 
-    engine = sqlalchemy.create_engine(migration_db)
-    try:
-        tables = set(inspect(engine).get_table_names())
-    finally:
-        engine.dispose()
-
+    tables = _table_names(migration_db)
     expected = {t.name for t in Base.metadata.tables.values()}
     assert expected <= tables, f"migration didn't create: {expected - tables}"
 
@@ -114,18 +116,10 @@ def test_alembic_downgrade_base_then_upgrade_head_is_reversible(migration_db: st
     command.upgrade(cfg, "head")
     command.downgrade(cfg, "base")
 
-    engine = sqlalchemy.create_engine(migration_db)
-    try:
-        tables_after_downgrade = set(inspect(engine).get_table_names()) - {"alembic_version"}
-    finally:
-        engine.dispose()
+    tables_after_downgrade = _table_names(migration_db) - {"alembic_version"}
     assert tables_after_downgrade == set(), f"downgrade left tables behind: {tables_after_downgrade}"
 
     command.upgrade(cfg, "head")
-    engine = sqlalchemy.create_engine(migration_db)
-    try:
-        tables_after_reupgrade = set(inspect(engine).get_table_names())
-    finally:
-        engine.dispose()
+    tables_after_reupgrade = _table_names(migration_db)
     expected = {t.name for t in Base.metadata.tables.values()}
     assert expected <= tables_after_reupgrade

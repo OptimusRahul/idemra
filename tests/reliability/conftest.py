@@ -24,27 +24,11 @@ import sqlalchemy
 from sqlalchemy.orm import Session, sessionmaker
 
 from idemra.db.models import Base
+from idemra.db.session import DEFAULT_DATABASE_URL
+from tests._live_infra import postgres_reachable, redis_reachable
 
-RELIABILITY_DATABASE_URL = "postgresql+psycopg://idemra:idemra@localhost:5433/idemra"
+RELIABILITY_DATABASE_URL = DEFAULT_DATABASE_URL
 RELIABILITY_REDIS_URL = "redis://localhost:6379/2"
-
-
-def _postgres_reachable() -> bool:
-    try:
-        engine = sqlalchemy.create_engine(RELIABILITY_DATABASE_URL)
-        with engine.connect():
-            return True
-    except Exception:  # noqa: BLE001 — any connection failure means "skip", not "crash the run"
-        return False
-    finally:
-        engine.dispose()
-
-
-def _redis_reachable() -> bool:
-    try:
-        return redis_lib.Redis.from_url(RELIABILITY_REDIS_URL).ping()
-    except Exception:  # noqa: BLE001 — any connection failure means "skip", not "crash the run"
-        return False
 
 
 @pytest.fixture(autouse=True)
@@ -54,9 +38,9 @@ def _real_infra_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IDEMRA_DATABASE_URL", RELIABILITY_DATABASE_URL)
     monkeypatch.setenv("IDEMRA_REDIS_URL", RELIABILITY_REDIS_URL)
 
-    if not _postgres_reachable():
+    if not postgres_reachable(RELIABILITY_DATABASE_URL):
         pytest.skip("real Postgres not reachable at localhost:5433 — run `docker compose up -d`")
-    if not _redis_reachable():
+    if not redis_reachable(RELIABILITY_REDIS_URL):
         pytest.skip("real Redis not reachable at localhost:6379 — run `docker compose up -d`")
 
 
