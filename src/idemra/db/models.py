@@ -32,6 +32,12 @@ class Run(Base):
     # pending -> running -> awaiting_approval -> approved/rejected -> applying -> completed/failed/stale
     task: Mapped[str] = mapped_column(String)
     repo: Mapped[str] = mapped_column(String)
+    # GitHub issue number / Actions run ID this run was sourced from, if any
+    # (idemra run --from-issue/--from-check) — None for a manually-typed
+    # task. Structured alongside the [source: <url>] marker idemra.github
+    # embeds in `task` itself, so a future watcher can query "is there
+    # already a run for this issue" without parsing free text.
+    source_ref: Mapped[str | None] = mapped_column(String, default=None)
     created_at: Mapped[datetime] = mapped_column(default=_now)
     updated_at: Mapped[datetime] = mapped_column(default=_now, onupdate=_now)
 

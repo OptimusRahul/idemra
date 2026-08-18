@@ -5,6 +5,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rq import Worker
 
 from idemra.agents.coder import MalformedProposal, propose_changes
@@ -15,6 +16,7 @@ from idemra.config.permissions import (
 )
 from idemra.config.scaffold import idemra_dir, write_scaffold
 from idemra.db.session import session_scope
+from idemra.github.fetch import GitHubFetchError, task_from_check, task_from_issue
 from idemra.llm.router import complete as llm_complete
 from idemra.orchestrator.master import record_routing_decision, route_task
 from idemra.orchestrator.runs import (
@@ -91,7 +93,18 @@ def index_cmd(repo: str = typer.Argument(".", help="Target repo to build the wor
 
 
 @app.command()
-def run(repo: str, task: str) -> None:
+def run(
+    repo: str,
+    task: str | None = typer.Argument(
+        None, help="The task to perform. Give this, or --from-issue, or --from-check — exactly one."
+    ),
+    from_issue: str | None = typer.Option(
+        None, "--from-issue", help="GitHub issue number to source the task from (e.g. 42)."
+    ),
+    from_check: str | None = typer.Option(
+        None, "--from-check", help="GitHub Actions run ID to source the task from its failed jobs' logs."
+    ),
+) -> None:
     """Start a run: route the task, propose a change via the Coder Agent,
     then gate it on approval.
 
@@ -103,11 +116,43 @@ def run(repo: str, task: str) -> None:
     non-git repo — so `idemra status`/`idemra log` can show it. Phase 3
     checked permissions/world-model *before* creating the run, which left
     those two failure classes with no audit trail at all.
+
+    A GitHub-sourced task (--from-issue/--from-check) follows the same
+    rule: Run.task is non-nullable, so the run row is created *first*
+    with a placeholder task, then task_from_issue/task_from_check resolve
+    the real text — a `gh` fetch failure still has a row to record itself
+    against, instead of being a silent console-print-and-exit.
     """
+    sources = [s for s in (task, from_issue, from_check) if s is not None]
+    if len(sources) != 1:
+        console.print("[red]exactly one of: task, --from-issue, --from-check is required[/red]")
+        raise typer.Exit(code=1)
+
     repo_root = Path(repo).resolve()
 
     with session_scope() as session:
-        run_row = create_run(session, repo=str(repo_root), task=task)
+        if from_issue is not None or from_check is not None:
+            source_ref = from_issue if from_issue is not None else from_check
+            source_kind = "GitHub issue" if from_issue is not None else "GitHub check run"
+            run_row = create_run(
+                session,
+                repo=str(repo_root),
+                task=f"[fetching {source_kind} {source_ref}]",
+                source_ref=source_ref,
+            )
+            try:
+                task = (
+                    task_from_issue(from_issue, repo_root)
+                    if from_issue is not None
+                    else task_from_check(from_check, repo_root)
+                )
+            except GitHubFetchError as exc:
+                fail_run(session, run_row, str(exc))
+                console.print(f"[red]Run {run_row.id} failed[/red]: {exc}")
+                raise typer.Exit(code=1)
+            run_row.task = task
+        else:
+            run_row = create_run(session, repo=str(repo_root), task=task)
 
         decision = route_task(task, repo_root)
         record_routing_decision(session, run_row, decision)
@@ -176,7 +221,7 @@ def status(run_id: str | None = typer.Argument(None)) -> None:
                 console.print("[yellow]No runs yet.[/yellow]")
                 return
             for r in runs:
-                console.print(f"  {r.id}  {r.status:<18} {r.task}")
+                console.print(f"  {r.id}  {r.status:<18} {escape(r.task)}")
             return
 
         try:
@@ -184,7 +229,7 @@ def status(run_id: str | None = typer.Argument(None)) -> None:
         except RunNotFound as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=1)
-        console.print(f"[bold]{r.id}[/bold]  status={r.status}  task={r.task!r}  repo={r.repo}")
+        console.print(f"[bold]{r.id}[/bold]  status={r.status}  task={escape(repr(r.task))}  repo={r.repo}")
 
 
 @app.command()
@@ -288,7 +333,7 @@ def sweep() -> None:
             return
         console.print(f"[bold]Expired {len(affected)} approval(s)[/bold], run(s) marked stale:")
         for r in affected:
-            console.print(f"  {r.id}  {r.task}")
+            console.print(f"  {r.id}  {escape(r.task)}")
 
 
 if __name__ == "__main__":

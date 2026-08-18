@@ -222,6 +222,75 @@ printed above.
 uv run idemra status <that-run-id>   # status=stale
 ```
 
+## Phase 6 — GitHub & Self-Healing
+
+`task_from_issue`/`task_from_check` resolve the target GitHub repo via
+`gh repo view` run *inside* the target repo, so `$TARGET` needs a real
+GitHub remote for this to work. Point it at this project's own repo
+purely so `gh` has something real to resolve against — nothing gets
+written back to it; `idemra run --from-issue` only *reads* the issue, and
+any proposed change still only ever touches `$TARGET`'s own files, gated
+behind the usual approval step. Needs the same LLM setup as Phase 3.
+
+```bash
+cd "$TARGET"
+git remote add origin git@github.com:OptimusRahul/idemra.git
+cd ~/Developer/ai-projects/idemra
+```
+
+```bash
+uv run idemra run "$TARGET" --from-issue 1
+```
+✅ Pass: `Run <uuid> created, awaiting approval (...)`. Note the run id:
+
+```bash
+export RUN_ID_GH=<uuid-from-output>
+uv run idemra status "$RUN_ID_GH"
+```
+✅ Pass: task shows `[source: https://github.com/OptimusRahul/idemra/issues/1]`
+followed by the real issue's title/body.
+
+```bash
+uv run idemra log "$RUN_ID_GH"
+```
+✅ Pass: same event order as a manually-typed task (`routing_decision` →
+`status_changed:running` → `change_proposed` → `status_changed:awaiting_approval`)
+— `--from-issue` changes *how the task text is built*, nothing downstream.
+
+```bash
+uv run idemra reject "$RUN_ID_GH" --reason "manual smoke test"
+```
+
+**Failure path** — a `gh` error is still auditable (the CT1 fix from the
+Phase 6 design review):
+
+```bash
+uv run idemra run "$TARGET" --from-issue 999999
+echo "exit code: $?"
+```
+✅ Pass: `Run <uuid> failed: gh issue view 999999 ... failed: ...`, exit
+code 1. The run row exists despite the fetch failing before any task
+text did:
+
+```bash
+uv run idemra status <uuid-from-above>   # status=failed
+uv run idemra log <uuid-from-above>      # status_changed:failed, reason mentions the gh error
+```
+
+**`--from-check`** needs a real failed GitHub Actions run somewhere —
+idemra's own CI is currently all green, so find one in a repo you have
+access to, or intentionally break something and push to generate one:
+
+```bash
+gh run list -R OptimusRahul/idemra --status failure --limit 1 --json databaseId
+```
+
+```bash
+uv run idemra run "$TARGET" --from-check <run-id-from-above>
+```
+✅ Pass: same shape as `--from-issue` above — `[source: <run url>]`
+followed by the failed job(s)' truncated logs.
+
 ## Cleanup
 
 ```bash

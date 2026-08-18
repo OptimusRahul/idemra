@@ -122,34 +122,71 @@ invocation. No new build/publish surface.
 
 ## Implementation Tasks
 
-- [ ] **T1 (P1, human: ~3h / CC: ~30min)** — github — Build src/idemra/github/fetch.py
+- [x] **T1 (P1, human: ~3h / CC: ~30min)** — github — Build src/idemra/github/fetch.py
   - Surfaced by: 1A, 1C, 2A, 3A, 3B — `_run_gh()` shared helper, `GitHubFetchError`, `task_from_issue()`, `task_from_check()` with per-job 200-line truncation + `[source: <url>]` marker + zero-failed-jobs rejection
   - Files: `src/idemra/github/fetch.py` (new)
   - Verify: `tests/unit/test_github_fetch.py` (T5) passes
-- [ ] **T2 (P1, human: ~1h / CC: ~15min)** — db — Add source_ref column
+- [x] **T2 (P1, human: ~1h / CC: ~15min)** — db — Add source_ref column
   - Surfaced by: CT2 — nullable `Run.source_ref`, new Alembic migration
   - Files: `src/idemra/db/models.py`, `migrations/versions/` (new)
   - Verify: `uv run alembic upgrade head` against real Postgres; `tests/integration/test_migrations.py` schema-diff test passes
-- [ ] **T3 (P1, human: ~30min / CC: ~10min)** — orchestrator — Thread source_ref through create_run()
+- [x] **T3 (P1, human: ~30min / CC: ~10min)** — orchestrator — Thread source_ref through create_run()
   - Surfaced by: CT2
   - Files: `src/idemra/orchestrator/runs.py`
   - Verify: `tests/unit/test_orchestrator_runs.py`
-- [ ] **T4 (P1, human: ~3h / CC: ~30min)** — cli — Wire --from-issue/--from-check into idemra run
+- [x] **T4 (P1, human: ~3h / CC: ~30min)** — cli — Wire --from-issue/--from-check into idemra run
   - Surfaced by: 2B (mutex validation), CT1 (create_run-first + placeholder task for auditable failures)
   - Files: `src/idemra/cli/main.py`
   - Verify: `tests/unit/test_cli_run.py` (T6) passes
-- [ ] **T5 (P2, human: ~2h / CC: ~20min)** — tests — test_github_fetch.py full suite
+- [x] **T5 (P2, human: ~2h / CC: ~20min)** — tests — test_github_fetch.py full suite
   - Surfaced by: Test review diagram (13 codepaths traced)
   - Files: `tests/unit/test_github_fetch.py` (new)
   - Verify: `uv run pytest tests/unit/test_github_fetch.py -v`
-- [ ] **T6 (P2, human: ~1h / CC: ~15min)** — tests — CLI mutex + fetch-failure audit-trail cases
+- [x] **T6 (P2, human: ~1h / CC: ~15min)** — tests — CLI mutex + fetch-failure audit-trail cases
   - Surfaced by: 2B, CT1
   - Files: `tests/unit/test_cli_run.py`
   - Verify: `uv run pytest tests/unit/test_cli_run.py -v`
-- [ ] **T7 (P3, human: ~20min / CC: ~5min)** — docs — Manual gh smoke-test entry
+- [x] **T7 (P3, human: ~20min / CC: ~5min)** — docs — Manual gh smoke-test entry
   - Surfaced by: CT3
   - Files: `docs/manual-testing.md`
   - Verify: manual run against a real GitHub issue
+
+## Implementation notes (discovered while building T1-T7)
+
+Two things the design/review passes didn't (and couldn't) catch until
+actual code was written and run against real infra:
+
+- **`--from-issue`/`--from-check` take bare IDs, not full URLs.**
+  Verified by hand against this project's own GitHub Actions runs: `gh
+  issue view` accepts a full URL directly, but `gh run view` does not
+  (`HTTP 404` when given one). The one interface that works consistently
+  for both is a bare issue number / run ID plus an explicit `-R
+  owner/repo` — resolved once via `gh repo view` run with `cwd=repo_root`
+  (the *target* repo, not idemra's own working directory), so `gh`
+  resolution is correct regardless of where `idemra` itself is invoked
+  from. The data-flow diagram above still shows `--from-issue URL` for
+  the high-level shape; the actual CLI takes bare IDs.
+- **Rich markup was silently eating the `[source: <url>]` marker.**
+  `console.print()` treats square brackets as markup syntax by default —
+  `[source: https://...]` parsed as an (unrecognized, silently dropped)
+  markup tag, not literal text. This affected every place a run's task
+  text gets printed (`idemra status`, `idemra sweep`), which would have
+  quietly defeated 3B/CT1's entire point (durable, human-visible source
+  tracking) the first time anyone actually ran the CLI. Fixed with
+  `rich.markup.escape()` at all three print sites. Caught by the new
+  `--from-issue`/`--from-check` tests in `tests/unit/test_cli_run.py`,
+  confirmed against a real GitHub issue via the manual smoke test.
+
+All T1-T7 verified against real Postgres/Redis/GitHub/Ollama, not just
+mocked tests: `--from-issue 1` against this repo's real issue #1 (full
+audit trail, correct `[source: ...]` display), the mutex validation, a
+real `gh` fetch failure (CT1's fix — the run row exists with the
+placeholder task and a clear failure reason), and 3A's zero-failed-jobs
+rejection against a real green CI run. `--from-check`'s job-log-fetching
+happy path is covered by 13 mocked unit tests plus the same `_run_gh`/
+`_repo_slug` code paths already proven live by `--from-issue` — not
+worth deliberately breaking this project's own CI just to manufacture a
+real failed run for one more manual check.
 
 ## GSTACK REVIEW REPORT
 

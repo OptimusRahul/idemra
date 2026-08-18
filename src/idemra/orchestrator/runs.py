@@ -164,8 +164,8 @@ def replay_run(session: Session, run_id: str) -> ReplayResult:
     return ReplayResult(run_id=run_id, status=status, applied_event_types=applied)
 
 
-def create_run(session: Session, repo: str, task: str) -> Run:
-    run = Run(repo=repo, task=task)
+def create_run(session: Session, repo: str, task: str, source_ref: str | None = None) -> Run:
+    run = Run(repo=repo, task=task, source_ref=source_ref)
     session.add(run)
     session.flush()
     return run

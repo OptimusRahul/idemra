@@ -279,3 +279,85 @@ def test_run_records_routing_decision_before_change_proposed(
     assert "routing_decision" in lines_with_events[0]
     event_types_in_order = [line.split()[1] for line in lines_with_events]
     assert event_types_in_order.index("routing_decision") < event_types_in_order.index("change_proposed")
+
+
+def test_run_with_from_issue_builds_task_via_github_fetch(
+    db, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "idemra.cli.main.llm_complete", _fake_complete_writing("new.py", "x = 1\n")
+    )
+    monkeypatch.setattr(
+        "idemra.cli.main.task_from_issue",
+        lambda issue_ref, repo_root: f"[source: https://github.com/o/r/issues/{issue_ref}]\n\nfix the bug",
+    )
+
+    result = runner.invoke(app, ["run", str(repo), "--from-issue", "42"])
+
+    assert result.exit_code == 0
+    assert "awaiting approval" in result.stdout
+    run_id = _extract_run_id(result.stdout)
+    status_result = runner.invoke(app, ["status", run_id])
+    # Rich wraps long lines at console width, so normalize whitespace
+    # before checking for the marker rather than matching an exact substring.
+    assert "[source: https://github.com/o/r/issues/42]" in " ".join(status_result.stdout.split())
+
+
+def test_run_with_from_check_builds_task_via_github_fetch(
+    db, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "idemra.cli.main.llm_complete", _fake_complete_writing("new.py", "x = 1\n")
+    )
+    monkeypatch.setattr(
+        "idemra.cli.main.task_from_check",
+        lambda run_ref, repo_root: f"[source: https://github.com/o/r/actions/runs/{run_ref}]\n\nfix the failure",
+    )
+
+    result = runner.invoke(app, ["run", str(repo), "--from-check", "999"])
+
+    assert result.exit_code == 0
+    run_id = _extract_run_id(result.stdout)
+    status_result = runner.invoke(app, ["status", run_id])
+    assert "[source: https://github.com/o/r/actions/runs/999]" in " ".join(status_result.stdout.split())
+
+
+def test_run_rejects_when_task_and_from_issue_both_given(db, repo: Path) -> None:
+    result = runner.invoke(app, ["run", str(repo), "add a file", "--from-issue", "42"])
+
+    assert result.exit_code == 1
+    assert "exactly one of" in result.stdout
+
+
+def test_run_rejects_when_none_of_task_from_issue_from_check_given(db, repo: Path) -> None:
+    result = runner.invoke(app, ["run", str(repo)])
+
+    assert result.exit_code == 1
+    assert "exactly one of" in result.stdout
+
+
+def test_run_fails_run_and_exits_1_on_github_fetch_error(
+    db, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CT1 fix, proven: a gh-fetch failure still has a Run row to
+    record itself against — auditable via status/log, not a silent
+    console-print-and-exit."""
+    from idemra.github.fetch import GitHubFetchError
+
+    def _raise(issue_ref: str, repo_root: Path) -> str:
+        raise GitHubFetchError(f"issue {issue_ref} not found")
+
+    monkeypatch.setattr("idemra.cli.main.task_from_issue", _raise)
+
+    result = runner.invoke(app, ["run", str(repo), "--from-issue", "999"])
+
+    assert result.exit_code == 1
+    assert "failed" in result.stdout
+    run_id = _extract_run_id(result.stdout)
+
+    status_result = runner.invoke(app, ["status", run_id])
+    assert status_result.exit_code == 0
+    assert "failed" in status_result.stdout
+
+    log_result = runner.invoke(app, ["log", run_id])
+    assert "issue 999 not found" in log_result.stdout
