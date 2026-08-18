@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from idemra.agents.coder import ProposedFile
@@ -131,8 +132,17 @@ def record_approval_decision(
     run.status = decision  # keep the materialized run.status in sync with the log
 
     # approval:<approval id>:decision — a retried/duplicated approve/reject
-    # call is a no-op, not a double-decision.
-    record_event(session, run, "status_changed", {"status": decision}, f"approval:{approval.id}:decision")
+    # call is a no-op, not a double-decision. Two concurrent callers can
+    # both pass the "still pending" check above before either commits; the
+    # idempotency_key's unique constraint is what actually serializes them,
+    # surfacing as IntegrityError on the loser's flush instead of the
+    # ApprovalConflict raised above for the sequential case. Translate it
+    # to the same exception so callers only ever need to handle one type.
+    try:
+        record_event(session, run, "status_changed", {"status": decision}, f"approval:{approval.id}:decision")
+    except IntegrityError:
+        session.rollback()
+        raise ApprovalConflict(f"approval for run {run_id} was decided concurrently by another request") from None
     return approval
 
 

@@ -8,6 +8,35 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # tests/reliability/ and tests/integration/test_migrations.py talk to
+    # real Postgres/Redis (see their conftest fixtures) — everything under
+    # tests/unit/ substitutes SQLite and a fake Redis URL instead, so it
+    # never needed these. Same images/ports as docker/docker-compose.yml.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: idemra
+          POSTGRES_USER: idemra
+          POSTGRES_PASSWORD: idemra
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U idemra"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
@@ -24,4 +53,4 @@ jobs:
         run: uv run ruff check .
 
       - name: Test
-        run: uv run pytest
+        run: uv run pytest --cov=src/idemra --cov-report=term-missing
