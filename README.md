@@ -91,6 +91,9 @@ uv run pytest
 git config core.hooksPath .githooks
 ```
 
+Exercising the real CLI against real Postgres/Redis, phase by phase:
+[`docs/manual-testing.md`](docs/manual-testing.md).
+
 ## License
 
 Unreleased — no license granted yet.
