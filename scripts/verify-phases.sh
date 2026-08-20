@@ -38,7 +38,7 @@ skip() { echo "  ⚠️  SKIP: $1"; SKIPPED=$((SKIPPED + 1)); }
 section() { echo; echo "=== $1 ==="; }
 
 check() {
-  # check "label" "grep pattern" <<< "$output"
+  # check "label" "grep pattern" "$output"
   local label="$1" pattern="$2" output="$3"
   if echo "$output" | grep -qF "$pattern"; then
     pass "$label"
@@ -54,13 +54,15 @@ echo "repo: $REPO_ROOT"
 section "0. Infrastructure"
 
 docker compose -f docker/docker-compose.yml up -d >/dev/null 2>&1
+PG_READY=0
 for _ in $(seq 1 15); do
   if docker exec docker-postgres-1 pg_isready -U idemra >/dev/null 2>&1; then
+    PG_READY=1
     break
   fi
   sleep 1
 done
-if docker exec docker-postgres-1 pg_isready -U idemra >/dev/null 2>&1; then
+if [ "$PG_READY" = "1" ]; then
   pass "Postgres reachable"
 else
   fail "Postgres not reachable after 15s — is docker/docker-compose.yml up?"
@@ -190,19 +192,11 @@ check "nonexistent repo is rejected by the router" "does not exist" "$OUT"
 # pipeline against real Postgres+Redis without needing Ollama/Claude.
 section "Phase 5 — Background Execution"
 
-SEED_RUN_ID="$(uv run python -c "
-from datetime import timedelta
-from idemra.agents.coder import ProposedFile
-from idemra.db.session import session_scope
-from idemra.orchestrator.runs import create_run, record_proposal, request_approval
-
-with session_scope() as session:
-    run = create_run(session, '$TARGET', 'verify-phases: add a subtract function')
-    record_proposal(session, run, [ProposedFile(path='calc.py', content='def add(a, b):\n    return a + b\n\n\ndef subtract(a, b):\n    return a - b\n')])
-    request_approval(session, run, 'write', timedelta(hours=24))
-    session.flush()
-    print(run.id)
-" 2>/dev/null)"
+SEED_RUN_ID="$(uv run python scripts/_seed_run.py --repo "$TARGET" \
+  --task "verify-phases: add a subtract function" \
+  --proposal-path calc.py \
+  --proposal-content $'def add(a, b):\n    return a + b\n\n\ndef subtract(a, b):\n    return a - b\n' \
+  --ttl-seconds 86400 2>/dev/null)"
 
 if [ -n "$SEED_RUN_ID" ]; then
   pass "seeded a run+proposal+approval directly against real Postgres"
@@ -244,19 +238,11 @@ if [ -n "$SEED_RUN_ID" ]; then
 fi
 
 # reject path — separate seeded run
-REJECT_RUN_ID="$(uv run python -c "
-from datetime import timedelta
-from idemra.agents.coder import ProposedFile
-from idemra.db.session import session_scope
-from idemra.orchestrator.runs import create_run, record_proposal, request_approval
-
-with session_scope() as session:
-    run = create_run(session, '$TARGET', 'verify-phases: reject path')
-    record_proposal(session, run, [ProposedFile(path='unwanted.py', content='x = 1\n')])
-    request_approval(session, run, 'write', timedelta(hours=24))
-    session.flush()
-    print(run.id)
-" 2>/dev/null)"
+REJECT_RUN_ID="$(uv run python scripts/_seed_run.py --repo "$TARGET" \
+  --task "verify-phases: reject path" \
+  --proposal-path unwanted.py \
+  --proposal-content $'x = 1\n' \
+  --ttl-seconds 86400 2>/dev/null)"
 
 if [ -n "$REJECT_RUN_ID" ]; then
   OUT="$(run_idemra reject "$REJECT_RUN_ID" --reason "verify-phases")"
@@ -271,17 +257,9 @@ else
 fi
 
 # sweep — a pre-expired approval
-SWEEP_RUN_ID="$(uv run python -c "
-from datetime import timedelta
-from idemra.db.session import session_scope
-from idemra.orchestrator.runs import create_run, request_approval
-
-with session_scope() as session:
-    run = create_run(session, '$TARGET', 'verify-phases: sweep target')
-    request_approval(session, run, 'write', timedelta(seconds=-1))
-    session.flush()
-    print(run.id)
-" 2>/dev/null)"
+SWEEP_RUN_ID="$(uv run python scripts/_seed_run.py --repo "$TARGET" \
+  --task "verify-phases: sweep target" \
+  --ttl-seconds -1 2>/dev/null)"
 
 if [ -n "$SWEEP_RUN_ID" ]; then
   OUT="$(run_idemra sweep)"
@@ -295,11 +273,15 @@ fi
 # --- Phase 6 — GitHub & Self-Healing --------------------------------------
 section "Phase 6 — GitHub & Self-Healing"
 
+# Computed once and reused in Phase 3 below — `gh auth status` makes a
+# real network/keychain round-trip, not worth paying for twice.
+GH_AVAILABLE=0
 if ! command -v gh >/dev/null 2>&1; then
   skip "gh CLI not installed — Phase 6 checks need it"
 elif ! gh auth status >/dev/null 2>&1; then
   skip "gh CLI not authenticated (run 'gh auth login') — Phase 6 checks need it"
 else
+  GH_AVAILABLE=1
   OUT="$(run_idemra run "$TARGET" "some task" --from-issue 1)"
   check "mutex: task + --from-issue both given is rejected" "exactly one of" "$OUT"
 
@@ -350,6 +332,13 @@ fi
 # back cleanly either way, not to grade the model's output.
 section "Phase 3 — First Agent & LLM"
 
+# Same env vars and defaults src/idemra/llm/router.py itself reads, so
+# this detection can't silently drift out of sync with what idemra would
+# actually try to call.
+OLLAMA_URL="${IDEMRA_OLLAMA_URL:-http://localhost:11434}"
+LOCAL_MODEL="${IDEMRA_LOCAL_MODEL:-ollama/qwen2.5-coder:7b}"
+OLLAMA_MODEL_NAME="${LOCAL_MODEL#ollama/}"
+
 LLM_AVAILABLE=0
 LLM_WHY=""
 if [ "$SKIP_LLM" = "1" ]; then
@@ -357,11 +346,11 @@ if [ "$SKIP_LLM" = "1" ]; then
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   LLM_AVAILABLE=1
   LLM_WHY="ANTHROPIC_API_KEY is set"
-elif curl -s -m 2 http://localhost:11434/api/tags 2>/dev/null | grep -q '"qwen2.5-coder'; then
+elif curl -s -m 2 "$OLLAMA_URL/api/tags" 2>/dev/null | grep -qF "\"$OLLAMA_MODEL_NAME\""; then
   LLM_AVAILABLE=1
-  LLM_WHY="Ollama reachable with qwen2.5-coder pulled"
+  LLM_WHY="Ollama reachable at $OLLAMA_URL with $OLLAMA_MODEL_NAME pulled"
 else
-  LLM_WHY="no ANTHROPIC_API_KEY and Ollama unreachable/model not pulled"
+  LLM_WHY="no ANTHROPIC_API_KEY and Ollama unreachable/model not pulled at $OLLAMA_URL"
 fi
 
 if [ "$LLM_AVAILABLE" = "1" ]; then
@@ -379,7 +368,7 @@ if [ "$LLM_AVAILABLE" = "1" ]; then
   LLM_RUN_ID="$(extract_run_id "$OUT")"
   [ -n "$LLM_RUN_ID" ] && run_idemra reject "$LLM_RUN_ID" --reason "verify-phases" >/dev/null
 
-  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  if [ "$GH_AVAILABLE" = "1" ]; then
     OUT="$(run_idemra run "$TARGET" --from-issue 1)"
     if echo "$OUT" | grep -qF "awaiting approval" || echo "$OUT" | grep -qF "malformed proposal"; then
       pass "--from-issue's full pipeline (fetch -> route -> LLM) runs end to end"
