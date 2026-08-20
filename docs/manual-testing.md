@@ -10,6 +10,13 @@ Every command below assumes it's run from the idemra repo root (the
 `uv`-managed venv lives there) against a separate scratch target repo —
 never test against the idemra repo itself.
 
+**Automated version:** `scripts/verify-phases.sh` runs everything below
+(plus the full `pytest` suite and lint) as one script — 38 checks, exit
+0/1, safe to run after any code change to confirm nothing broke. Read
+this doc for the *why* behind each check; run the script for a fast,
+repeatable *is it still true* answer. `--skip-llm` skips the one section
+needing a real LLM.
+
 ## 0. One-time setup
 
 ```bash

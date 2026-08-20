@@ -92,7 +92,12 @@ git config core.hooksPath .githooks
 ```
 
 Exercising the real CLI against real Postgres/Redis, phase by phase:
-[`docs/manual-testing.md`](docs/manual-testing.md).
+[`docs/manual-testing.md`](docs/manual-testing.md), or run it automated:
+
+```bash
+./scripts/verify-phases.sh          # pytest + lint + every phase, live
+./scripts/verify-phases.sh --skip-llm   # same, minus the one LLM-dependent check
+```
 
 ## License
 
